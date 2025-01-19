@@ -3,7 +3,9 @@
 (ns volume-pipewire
   (:require [babashka.process :refer [process shell]]
             [clojure.string :as str]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [clojure.core.async :as async]))
+
 (def config
   (atom {:audio-high-symbol " "
          :audio-med-thresh 50
@@ -12,27 +14,13 @@
          :audio-low-symbol " "
          :audio-muted-symbol " "
          :audio-delta 5
-         :default-color "#ffffff"
-         :muted-color "#a0a0a0"
-         :subscribe false
-         :mixer ""
-         :scontrol ""}))
+         :subscribe false}))
 
 (defn parse-args [args]
   (doseq [arg args]
       (case arg
         "-S" (swap! config assoc :subscribe true)
-        ;; ... handle other options similarly
         (println "Unknown option:" arg))))
-
-(defn amixer-get-scontrol [mixer]
-  (->> (process ["amixer" "-D" mixer "scontrols"] {:out :string})
-       :out
-       (str/split-lines)
-       (map #(re-find #"Simple mixer control '([^']+)'" %))
-       (remove nil?)
-       (map second)
-       first))
 
 (defn set-default-playback-device-next [direction]
   (let [sinks (->> (process ["pactl" "list" "sinks"] {:out :string})
@@ -56,12 +44,7 @@
                            (< idx 0) (dec num-devices)
                            :else idx))
             new-default (nth sinks next-index)]
-        (println current-index)
-        (println next-index)
-        (println new-default)
-        (println sinks)
-        (process ["pactl" "set-default-sink" new-default])
-        (println "Set default sink to:" new-default)))))
+        (process ["pactl" "set-default-sink" new-default])))))
 
 (defn grep-with-context
   [lines target before after]
@@ -108,34 +91,57 @@
                :else (:audio-high-symbol @config))]
     (println (str symb vol "%" " [" index ":" nick "]"))))
 
-;; (defn button-action
-;;   [& [{:keys [button] :or {button (System/getenv "BLOCK_BUTTON")}}]]
-;;   (case button
-;;     "1" (set-default-playback-device-next 1)
-;;     "2" (shell "amixer -q -D")))
+
+(defn mute-default [] (shell "pactl set-sink-mute @DEFAULT_SINK@ toggle"))
+(defn volume-default+ [] (shell (format "pactl set-sink-volume @DEFAULT_SINK@ +%s%%" (:audio-delta @config))))
+(defn volume-default- [] (shell (format "pactl set-sink-volume @DEFAULT_SINK@ -%s%%" (:audio-delta @config))))
+
+(defn button-action
+  [& [{:keys [button] :or {button (System/getenv "BLOCK_BUTTON")}}]]
+  (case button
+    "1" (set-default-playback-device-next 1)
+    "2" (mute-default)
+    "3" (set-default-playback-device-next -1)
+    "4" (volume-default+)
+    "5" (volume-default-)))
+
+(defn handle-input []
+  (println "Listening for pactl events and stdin input (type 1-5):")
+  (let [pactl-proc (process ["pactl" "subscribe"] {:out :pipe})
+        pactl-out (io/reader (:out pactl-proc))
+        stdin (io/reader System/in)]
+    (loop []
+      (-> (async/alts!! [(async/thread (.readLine pactl-out))
+                         ])
+          first :out print)
+      ;; (let [futures {:pactl (future (try (.readLine pactl-out) (catch Exception _ nil)))
+      ;;                  :stdin (future (try (.readLine stdin) (catch Exception _ nil)))}
+      ;;       readable (select-keys futures (keys (filter #(realized? (% futures)) '(:pactl :stdin))))]
+
+      ;;   (cond
+      ;;     (:pactl readable)
+      ;;     (when-let [line (deref (:pactl readable))]
+      ;;       (println "Received from pactl:" line))
+
+      ;;     (:stdin readable)
+      ;;     (when-let [line (deref (:stdin read))] )))
+      (recur))))
 
 (defn main [& args]
   (parse-args (first args))
-
-  (swap! config assoc :mixer
-         (or (:mixer @config)
-             (if (= 0 (:exit (process ["amixer" "-D" "pulse" "info"] {:out :string})))
-               "pulse"
-               "default")))
-  (swap! config assoc :scontrol
-         (or (:scontrol @config)
-             (amixer-get-scontrol (:mixer @config))))
-
+  (let [button-press (System/getenv "BLOCK_BUTTON")]
+    (when button-press
+      (button-action button-press)))
   (print-block)
 
   (when (:subscribe @config)
-    (let [pactl-proc (process ["pactl" "subscribe"] {:out :pipe})
-          reader (io/reader (:out pactl-proc))]
-      (loop []
-        (when-let [line (.readLine reader)]
-          (when (str/includes? line "change")
-            (print-block))
-          (recur))))))
+    (handle-input)))
+    ;; (let [pactl-proc (process ["pactl" "subscribe"] {:out :pipe})
+    ;;       reader (io/reader (:out pactl-proc))]
+    ;;   (loop []
+    ;;     (when-let [line (.readLine reader)]
+    ;;       (when (str/includes? line "change")
+    ;;         (print-block))
+    ;;       (recur))))))
 
-(print (System/getenv "BLOCK_BUTTON"))
 (main *command-line-args*)
