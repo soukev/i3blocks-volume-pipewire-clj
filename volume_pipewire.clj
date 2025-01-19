@@ -12,7 +12,7 @@
          :audio-med-symbol " "
          :audio-low-thresh 0
          :audio-low-symbol " "
-         :audio-muted-symbol " "
+         :audio-muted-symbol " "
          :audio-delta 5
          :subscribe false}))
 
