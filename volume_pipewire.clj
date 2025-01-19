@@ -18,9 +18,9 @@
 
 (defn parse-args [args]
   (doseq [arg args]
-      (case arg
-        "-S" (swap! config assoc :subscribe true)
-        (println "Unknown option:" arg))))
+    (case arg
+      "-S" (swap! config assoc :subscribe true)
+      (println "Unknown option:" arg))))
 
 (defn set-default-playback-device-next [direction]
   (let [sinks (->> (process ["pactl" "list" "sinks"] {:out :string})
@@ -46,8 +46,7 @@
             new-default (nth sinks next-index)]
         (process ["pactl" "set-default-sink" new-default])))))
 
-(defn grep-with-context
-  [lines target before after]
+(defn find-with-context [lines target before after]
   (let [splitted-lines (str/split-lines lines)
         line-count (count splitted-lines)]
     (->> (map-indexed vector splitted-lines)
@@ -58,16 +57,15 @@
                      (subvec splitted-lines start end))))
          (str/join "\n"))))
 
-(defn get-active-sink
-  []
+(defn get-active-sink []
   (let [running (-> (process {:out :string} "pactl list sinks")
                     deref :out
-                    (grep-with-context "State: Running" 4 55))]
+                    (find-with-context "State: Running" 4 55))]
     (if (str/blank? running)
       (let [default-sink (-> (shell {:out :string} "pactl get-default-sink") :out)]
         (-> (process {:out :string} "pactl list sinks")
             deref :out
-            (grep-with-context (str/trim default-sink) 4 55)))
+            (find-with-context (str/trim default-sink) 4 55)))
       running)))
 
 (defn print-block []
@@ -91,7 +89,6 @@
                :else (:audio-high-symbol @config))]
     (println (str symb vol "%" " [" index ":" nick "]"))))
 
-
 (defn mute-default [] (shell "pactl set-sink-mute @DEFAULT_SINK@ toggle"))
 (defn volume-default+ [] (shell (format "pactl set-sink-volume @DEFAULT_SINK@ +%s%%" (:audio-delta @config))))
 (defn volume-default- [] (shell (format "pactl set-sink-volume @DEFAULT_SINK@ -%s%%" (:audio-delta @config))))
@@ -105,43 +102,43 @@
     "4" (volume-default+)
     "5" (volume-default-)))
 
+(defn run-async-channel! [stream channel channel-key]
+  (async/thread
+    (try
+      (loop []
+        (when-let [line (.readLine stream)]
+          (async/>!! channel {:source channel-key :line line})
+          (recur)))
+      (finally
+        (async/close! channel)))))
+
 (defn handle-input []
-  (println "Listening for pactl events and stdin input (type 1-5):")
   (let [pactl-proc (process ["pactl" "subscribe"] {:out :pipe})
         pactl-out (io/reader (:out pactl-proc))
-        stdin (io/reader System/in)]
+        stdin (io/reader System/in)
+        pactl-chan (async/chan)
+        stdin-chan (async/chan)]
+    (run-async-channel! pactl-out pactl-chan :pactl)
+    (run-async-channel! stdin stdin-chan :stdin)
     (loop []
-      (-> (async/alts!! [(async/thread (.readLine pactl-out))
-                         ])
-          first :out print)
-      ;; (let [futures {:pactl (future (try (.readLine pactl-out) (catch Exception _ nil)))
-      ;;                  :stdin (future (try (.readLine stdin) (catch Exception _ nil)))}
-      ;;       readable (select-keys futures (keys (filter #(realized? (% futures)) '(:pactl :stdin))))]
-
-      ;;   (cond
-      ;;     (:pactl readable)
-      ;;     (when-let [line (deref (:pactl readable))]
-      ;;       (println "Received from pactl:" line))
-
-      ;;     (:stdin readable)
-      ;;     (when-let [line (deref (:stdin read))] )))
+      (let [[message _] (async/alts!! [pactl-chan stdin-chan])]
+        (when message
+          (case (:source message)
+            :pactl (when (str/includes? (:line message) "change")
+                     (print-block))
+            :stdin (button-action {:button (:line message)}))))
       (recur))))
 
 (defn main [& args]
   (parse-args (first args))
+
   (let [button-press (System/getenv "BLOCK_BUTTON")]
     (when button-press
       (button-action button-press)))
+
   (print-block)
 
   (when (:subscribe @config)
     (handle-input)))
-    ;; (let [pactl-proc (process ["pactl" "subscribe"] {:out :pipe})
-    ;;       reader (io/reader (:out pactl-proc))]
-    ;;   (loop []
-    ;;     (when-let [line (.readLine reader)]
-    ;;       (when (str/includes? line "change")
-    ;;         (print-block))
-    ;;       (recur))))))
 
 (main *command-line-args*)
