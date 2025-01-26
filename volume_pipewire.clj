@@ -1,10 +1,9 @@
 #!/usr/bin/env bb
 
-(ns volume-pipewire
-  (:require [babashka.process :refer [process shell]]
-            [clojure.string :as str]
-            [clojure.java.io :as io]
-            [clojure.core.async :as async]))
+(require '[babashka.process :refer [process shell]]
+         '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[clojure.core.async :as async])
 
 (def config
   (atom {:audio-high-symbol " "
@@ -14,13 +13,21 @@
          :audio-low-symbol " "
          :audio-muted-symbol " "
          :audio-delta 5
-         :subscribe false}))
+         :subscribe false
+         :description-name nil}))
+
+(defn match-d-number [input]
+  (if-let [[_ number] (re-matches #"-D(\d+)" input)]
+    (Integer/parseInt number)
+    nil))
 
 (defn parse-args [args]
   (doseq [arg args]
-    (case arg
-      "-S" (swap! config assoc :subscribe true)
-      (println "Unknown option:" arg))))
+    (let [desc-num (match-d-number arg)]
+     (cond
+       (= "-S" arg) (swap! config assoc :subscribe true)
+       desc-num (swap! config assoc :description-name desc-num)
+       :else (println "Unknown option:" arg)))))
 
 (defn set-default-playback-device-next [direction]
   (let [sinks (->> (process ["pactl" "list" "sinks"] {:out :string})
@@ -68,6 +75,19 @@
             (find-with-context (str/trim default-sink) 4 55)))
       running)))
 
+(defn name-from-sink-info
+  [sink-info]
+  (if (:description-name @config)
+    (->> sink-info
+         (re-find #"Description: (.*)")
+         second
+         (#(str/split % #" "))
+         (take (:description-name @config))
+         (str/join " "))
+    (->> sink-info
+         (re-find #"node.nick = \"(.*)\"")
+         second)))
+
 (defn print-block []
   (let [active (get-active-sink)
         vol (->> active
@@ -79,15 +99,13 @@
         index (->> active
                    (re-find #"api.alsa.pcm.card = \"([0-9]+)\"")
                    second)
-        nick (->> active
-                  (re-find #"node.nick = \"(.*)\"")
-                  second)
+        name (name-from-sink-info active)
         symb (cond
                (= muted "yes") (:audio-muted-symbol @config)
                (<= (Integer. vol) (:audio-low-thresh @config)) (:audio-low-symbol @config)
                (<= (Integer. vol) (:audio-med-thresh @config)) (:audio-med-symbol @config)
                :else (:audio-high-symbol @config))]
-    (println (str symb vol "%" " [" index ":" nick "]"))))
+    (println (str symb vol "%" " [" index ":" name "]"))))
 
 (defn mute-default [] (shell "pactl set-sink-mute @DEFAULT_SINK@ toggle"))
 (defn volume-default+ [] (shell (format "pactl set-sink-volume @DEFAULT_SINK@ +%s%%" (:audio-delta @config))))
