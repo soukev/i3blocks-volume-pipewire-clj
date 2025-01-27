@@ -88,6 +88,12 @@
          (re-find #"node.nick = \"(.*)\"")
          second)))
 
+(defn create-display-string [symb vol index name]
+  (let [identificator (if index
+                        (str "[" index ":" name "]")
+                        (str "[" name "]"))]
+    (str symb vol "% " identificator)))
+
 (defn print-block []
   (let [active (get-active-sink)
         vol (->> active
@@ -105,7 +111,7 @@
                (<= (Integer. vol) (:audio-low-thresh @config)) (:audio-low-symbol @config)
                (<= (Integer. vol) (:audio-med-thresh @config)) (:audio-med-symbol @config)
                :else (:audio-high-symbol @config))]
-    (println (str symb vol "%" " [" index ":" name "]"))))
+    (println (create-display-string symb vol index name))))
 
 (defn mute-default [] (shell "pactl set-sink-mute @DEFAULT_SINK@ toggle"))
 (defn volume-default+ [] (shell (format "pactl set-sink-volume @DEFAULT_SINK@ +%s%%" (:audio-delta @config))))
